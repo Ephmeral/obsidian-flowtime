@@ -1,0 +1,491 @@
+/* ========================================================================
+   FlowTime Obsidian 插件样式表 - 兼容明暗模式与侧边栏响应式布局
+   ======================================================================== */
+
+.flowtime-calendar-view {
+    padding: 12px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    background-color: var(--background-primary);
+    font-family: var(--font-interface);
+    gap: 16px;
+    box-sizing: border-box;
+}
+
+/* ========================================================================
+   1. 药丸选项卡页签 (Segmented Control Tabs)
+   ======================================================================== */
+.flowtime-tabs {
+    display: flex;
+    background-color: var(--background-secondary-alt);
+    padding: 3px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.flowtime-tab {
+    flex: 1;
+    text-align: center;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    border-radius: 6px;
+    cursor: pointer;
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    outline: none;
+    box-shadow: none;
+    transition: all 0.2s ease-in-out;
+}
+
+.flowtime-tab:hover {
+    color: var(--text-normal);
+}
+
+.flowtime-tab.is-active {
+    background-color: var(--background-primary);
+    color: var(--text-normal);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* ========================================================================
+   2. 日历 Header & 导航
+   ======================================================================== */
+.flowtime-calendar-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.flowtime-calendar-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.flowtime-month-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background-color: var(--background-secondary);
+    border-radius: 8px;
+    padding: 4px 8px;
+    border: 1px solid var(--divider-color);
+}
+
+.flowtime-month-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.flowtime-icon-button {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 16px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    line-height: 1;
+    transition: background 0.2s;
+}
+
+.flowtime-icon-button:hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-normal);
+}
+
+/* 小按钮统一样式 */
+.flowtime-small-button {
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+    border: none;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.2s, opacity 0.2s;
+}
+
+.flowtime-small-button:hover {
+    background-color: var(--interactive-accent-hover);
+    opacity: 0.95;
+}
+
+/* ========================================================================
+   3. 响应式自适应日历网格 (Grid & Day Cells)
+   ======================================================================== */
+.flowtime-calendar-grid {
+    display: grid;
+    grid-template-columns: 0.8fr repeat(7, 1fr);
+    gap: 4px;
+    width: 100%;
+}
+
+/* 周数单元格 - 最左侧展示周数的列，可点击以打开或创建周记 */
+button.flowtime-calendar-week {
+    position: relative !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background-color: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 8px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    cursor: pointer !important;
+    height: auto !important;
+    aspect-ratio: 1 / 1 !important;
+    transition: all 0.2s ease !important;
+    box-sizing: border-box !important;
+    box-shadow: none !important;
+}
+
+button.flowtime-calendar-week:hover {
+    background-color: var(--background-modifier-hover) !important;
+    border-color: var(--border-color) !important;
+}
+
+.flowtime-week-number {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted) !important;
+}
+
+button.flowtime-calendar-week:hover .flowtime-week-number {
+    color: var(--text-normal) !important;
+}
+
+/* 星期列头 */
+.flowtime-calendar-dow {
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 6px 0;
+}
+
+/* 日期单元格 - 提高优先级并重置 Obsidian 默认按钮高度限制 */
+button.flowtime-calendar-day {
+    position: relative !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background-color: transparent !important; /* 默认设为透明，消除厚重的积木感 */
+    border: 1px solid transparent !important;
+    border-radius: 8px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    cursor: pointer !important;
+    height: auto !important; /* 必须重置以允许 aspect-ratio 生效 */
+    aspect-ratio: 1 / 1 !important; /* 确保在侧边栏宽度改变时为完美正方形 */
+    transition: all 0.2s ease !important;
+    box-sizing: border-box !important;
+    box-shadow: none !important;
+}
+
+button.flowtime-calendar-day:hover {
+    background-color: var(--background-modifier-hover) !important;
+    border-color: var(--border-color) !important;
+}
+
+/* 状态文字色彩修饰 */
+button.flowtime-calendar-day.is-current-month .flowtime-day-number {
+    color: var(--text-normal) !important;
+}
+
+button.flowtime-calendar-day.is-other-month .flowtime-day-number {
+    color: var(--text-faint) !important;
+}
+
+.flowtime-day-number {
+    font-size: 13px;
+    font-weight: 500;
+    z-index: 2;
+}
+
+/* 今天 (Today) 样式 */
+button.flowtime-calendar-day.is-today {
+    background-color: color-mix(in srgb, var(--interactive-accent) 10%, transparent) !important;
+    border: 1px solid var(--interactive-accent) !important;
+}
+
+button.flowtime-calendar-day.is-today .flowtime-day-number {
+    font-weight: 700 !important;
+    color: var(--interactive-accent) !important;
+}
+
+/* 选中态 (Selected) 样式 */
+button.flowtime-calendar-day.is-selected {
+    box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--interactive-accent) !important;
+    z-index: 5 !important;
+}
+
+/* ========================================================================
+   4. 日历格子的状态指示器 (Indicator Pips)
+   ======================================================================== */
+.flowtime-day-marker {
+    display: block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    margin-top: 2px;
+    background-color: transparent;
+    z-index: 3;
+    transition: transform 0.2s ease;
+}
+
+/* 状态色彩与背景柔和混合映射 */
+button.flowtime-calendar-day.is-synced {
+    background-color: color-mix(in srgb, #4caf50 8%, transparent) !important;
+}
+button.flowtime-calendar-day.is-synced .flowtime-day-marker {
+    background-color: #4caf50 !important;
+}
+
+button.flowtime-calendar-day.is-stale {
+    background-color: color-mix(in srgb, #ff9800 8%, transparent) !important;
+}
+button.flowtime-calendar-day.is-stale .flowtime-day-marker {
+    background-color: #ff9800 !important;
+}
+
+button.flowtime-calendar-day.is-conflict {
+    background-color: color-mix(in srgb, #f44336 8%, transparent) !important;
+    border-color: color-mix(in srgb, #f44336 25%, transparent) !important;
+}
+button.flowtime-calendar-day.is-conflict .flowtime-day-marker {
+    background-color: #f44336 !important;
+}
+
+button.flowtime-calendar-day.is-locked {
+    opacity: 0.75 !important;
+}
+button.flowtime-calendar-day.is-locked .flowtime-day-marker {
+    background-color: var(--text-muted) !important;
+}
+
+button.flowtime-calendar-day.is-syncing {
+    background-color: color-mix(in srgb, var(--interactive-accent) 8%, transparent) !important;
+    animation: flowtime-pulse 1.5s infinite ease-in-out !important;
+}
+button.flowtime-calendar-day.is-syncing .flowtime-day-marker {
+    background-color: var(--interactive-accent) !important;
+}
+
+button.flowtime-calendar-day.is-error {
+    background-color: color-mix(in srgb, #d32f2f 8%, transparent) !important;
+}
+button.flowtime-calendar-day.is-error .flowtime-day-marker {
+    background-color: #d32f2f !important;
+}
+
+@keyframes flowtime-pulse {
+    0% { opacity: 0.6; }
+    50% { opacity: 1; }
+    100% { opacity: 0.6; }
+}
+
+/* ========================================================================
+   5. 图例样式 (Legend)
+   ======================================================================== */
+.flowtime-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--divider-color);
+}
+
+.flowtime-legend-item {
+    display: flex;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-muted);
+    gap: 4px;
+}
+
+.flowtime-legend-pip {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+
+.flowtime-legend-pip.is-synced { background-color: #4caf50; }
+.flowtime-legend-pip.is-stale { background-color: #ff9800; }
+.flowtime-legend-pip.is-conflict { background-color: #f44336; }
+.flowtime-legend-pip.is-locked { background-color: var(--text-muted); }
+.flowtime-legend-pip.is-empty { background-color: transparent; border: 1px solid var(--text-faint); }
+
+/* ========================================================================
+   6. 统计面板样式 (Monthly Stats)
+   ======================================================================== */
+.flowtime-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    background-color: var(--background-secondary);
+    border-radius: 8px;
+    padding: 10px;
+    border: 1px solid var(--divider-color);
+}
+
+.flowtime-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+
+.flowtime-stat-value {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.flowtime-stat-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* ========================================================================
+   7. 详情面板样式 (Selected Day Panel)
+   ======================================================================== */
+.flowtime-day-panel {
+    background-color: var(--background-secondary-alt);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.flowtime-day-panel-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--divider-color);
+    padding-bottom: 8px;
+}
+
+.flowtime-day-panel-title span:first-child {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.flowtime-status-badge {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 12px;
+}
+
+.flowtime-status-badge.is-synced { background-color: rgba(76, 175, 80, 0.15); color: #4caf50; }
+.flowtime-status-badge.is-stale { background-color: rgba(255, 152, 0, 0.15); color: #ff9800; }
+.flowtime-status-badge.is-conflict { background-color: rgba(244, 67, 54, 0.15); color: #f44336; }
+.flowtime-status-badge.is-locked { background-color: var(--background-modifier-border); color: var(--text-muted); }
+.flowtime-status-badge.is-empty { background-color: transparent; border: 1px solid var(--border-color); color: var(--text-muted); }
+.flowtime-status-badge.is-error { background-color: rgba(211, 47, 47, 0.15); color: #d32f2f; }
+
+.flowtime-day-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-normal);
+}
+
+.flowtime-day-error {
+    color: var(--text-error);
+    font-size: 11px;
+    background-color: rgba(244, 67, 54, 0.05);
+    border-radius: 4px;
+    padding: 6px;
+    margin-top: 4px;
+    border-left: 3px solid #f44336;
+}
+
+.flowtime-day-actions {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.flowtime-day-actions .flowtime-small-button {
+    font-size: 11px;
+    padding: 8px 4px;
+    text-align: center;
+}
+
+/* ========================================================================
+   8. 内容兼容策略样式 (Compatibility Tab)
+   ======================================================================== */
+.flowtime-note-frame {
+    background-color: var(--background-secondary-alt);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 12px;
+}
+
+.flowtime-note-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-normal);
+    border-bottom: 1px solid var(--divider-color);
+    padding-bottom: 6px;
+    margin-bottom: 8px;
+}
+
+.flowtime-note-frame pre {
+    margin: 0;
+    font-family: var(--font-monospace);
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    color: var(--text-muted);
+}
+
+.flowtime-compat-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.flowtime-compat-card {
+    background-color: var(--background-secondary);
+    border-radius: 8px;
+    padding: 10px;
+    border: 1px solid var(--divider-color);
+}
+
+.flowtime-compat-card-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-normal);
+    margin-bottom: 4px;
+}
+
+.flowtime-muted {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* 周数单元格选中高亮状态 */
+button.flowtime-calendar-week.is-selected {
+    box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--interactive-accent) !important;
+    z-index: 5 !important;
+}

@@ -1,0 +1,8 @@
+node_modules/
+build-test/
+main.js
+*.map
+.DS_Store
+.env
+.env.*
+docs
