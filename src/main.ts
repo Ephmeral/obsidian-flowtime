@@ -12,6 +12,7 @@ import {
   WorkspaceLeaf,
   normalizePath,
   requestUrl,
+  moment,
 } from "obsidian";
 
 import {
@@ -158,6 +159,10 @@ interface BridgeWriteResult {
 
 export default class FlowTimePlugin extends Plugin {
   settings: FlowTimePluginSettings = { ...DEFAULT_SETTINGS };
+  private cachedCategoryRecords: SyncRecordResponse[] = [];
+  private cachedTagRecords: SyncRecordResponse[] = [];
+  private cachedEntryRecords: SyncRecordResponse[] = [];
+  private collectionCursors: Record<string, number> = {};
 
   async onload() {
     await this.loadSettings();
@@ -257,6 +262,10 @@ export default class FlowTimePlugin extends Plugin {
     this.settings.accessToken = "";
     this.settings.tokenType = "Bearer";
     this.settings.tokenExpiresAt = "";
+    this.cachedCategoryRecords = [];
+    this.cachedTagRecords = [];
+    this.cachedEntryRecords = [];
+    this.collectionCursors = {};
     await this.saveSettings();
     new Notice("已清除 FlowTime 登录状态。");
   }
@@ -286,7 +295,7 @@ export default class FlowTimePlugin extends Plugin {
       status: "syncing",
       errorMessage: "",
     });
-    await this.refreshCalendarViews();
+    this.setCalendarViewsSyncing(true);
 
     try {
       if (!options.quiet) {
@@ -306,6 +315,7 @@ export default class FlowTimePlugin extends Plugin {
       new Notice(`FlowTime 同步失败：${message}`);
       console.error("[FlowTime] syncDay failed", error);
     } finally {
+      this.setCalendarViewsSyncing(false);
       await this.refreshCalendarViews();
     }
   }
@@ -316,6 +326,7 @@ export default class FlowTimePlugin extends Plugin {
       return;
     }
 
+    this.setCalendarViewsSyncing(true);
     try {
       new Notice("正在同步 FlowTime 本月数据...");
       const data = await this.loadFlowTimeData();
@@ -347,6 +358,7 @@ export default class FlowTimePlugin extends Plugin {
       new Notice(`FlowTime 本月同步失败：${message}`);
       console.error("[FlowTime] syncMonth failed", error);
     } finally {
+      this.setCalendarViewsSyncing(false);
       await this.refreshCalendarViews();
     }
   }
@@ -444,28 +456,8 @@ export default class FlowTimePlugin extends Plugin {
     if (!folder) return null;
 
     const format = this.settings.weeklyNoteFormat.trim() || "YYYY-[W]WW";
-    const weekStr = String(week).padStart(2, "0");
-    const yearStr = String(year);
-
-    // 1. 用正则表达式找出所有被 [] 包裹的转义字符，并把它们保护起来
-    const escapedBlocks: string[] = [];
-    let tempFormat = format.replace(/\[([^\]]*)\]/g, (match, content) => {
-      escapedBlocks.push(content);
-      return `__ESC_${escapedBlocks.length - 1}__`;
-    });
-
-    // 2. 替换常规时间占位符
-    tempFormat = tempFormat
-      .replace(/YYYY/g, yearStr)
-      .replace(/WW/g, weekStr)
-      .replace(/ww/g, weekStr)
-      .replace(/W/g, String(week))
-      .replace(/w/g, String(week));
-
-    // 3. 将保护的字符还原恢复
-    const filename = tempFormat.replace(/__ESC_(\d+)__/g, (match, index) => {
-      return escapedBlocks[Number(index)] ?? "";
-    });
+    const m = moment().isoWeekYear(year).isoWeek(week).startOf("isoWeek");
+    const filename = m.format(format);
 
     return normalizePath(`${folder}/${filename}.md`);
   }
@@ -506,6 +498,7 @@ export default class FlowTimePlugin extends Plugin {
       return;
     }
 
+    this.setCalendarViewsSyncing(true);
     try {
       new Notice(`正在同步 FlowTime 周度数据：${year} 年第 ${week} 周`);
 
@@ -574,6 +567,9 @@ export default class FlowTimePlugin extends Plugin {
       const message = error instanceof Error ? error.message : String(error);
       new Notice(`FlowTime 周同步失败：${message}`);
       console.error("[FlowTime] syncWeeklyNote failed", error);
+    } finally {
+      this.setCalendarViewsSyncing(false);
+      await this.refreshCalendarViews();
     }
   }
 
@@ -859,9 +855,9 @@ export default class FlowTimePlugin extends Plugin {
 
   private async loadFlowTimeData(): Promise<FlowTimeDataSet> {
     const [categoryRecords, tagRecords, entryRecords] = await Promise.all([
-      this.pullCollection("core.categories"),
-      this.pullCollection("core.tags"),
-      this.pullCollection("core.time_entries"),
+      this.pullCollection("core.categories", this.cachedCategoryRecords),
+      this.pullCollection("core.tags", this.cachedTagRecords),
+      this.pullCollection("core.time_entries", this.cachedEntryRecords),
     ]);
 
     return {
@@ -871,10 +867,10 @@ export default class FlowTimePlugin extends Plugin {
     };
   }
 
-  private async pullCollection(collection: string): Promise<SyncRecordResponse[]> {
-    const records: SyncRecordResponse[] = [];
-    let sinceVersion = 0;
+  private async pullCollection(collection: string, cache: SyncRecordResponse[]): Promise<SyncRecordResponse[]> {
+    let sinceVersion = this.collectionCursors[collection] ?? 0;
     const limit = 1000;
+    const newRecords: SyncRecordResponse[] = [];
 
     while (true) {
       const query = new URLSearchParams({
@@ -894,7 +890,7 @@ export default class FlowTimePlugin extends Plugin {
         break;
       }
 
-      records.push(...data.records);
+      newRecords.push(...data.records);
       const maxVersion = Math.max(...data.records.map((record) => record.server_version));
       if (maxVersion <= sinceVersion) {
         break;
@@ -906,7 +902,23 @@ export default class FlowTimePlugin extends Plugin {
       }
     }
 
-    return records;
+    if (newRecords.length > 0) {
+      this.collectionCursors[collection] = sinceVersion;
+      for (const record of newRecords) {
+        const index = cache.findIndex((r) => r.record_id === record.record_id);
+        if (index > -1) {
+          if (record.deleted) {
+            cache.splice(index, 1);
+          } else {
+            cache[index] = record;
+          }
+        } else if (!record.deleted) {
+          cache.push(record);
+        }
+      }
+    }
+
+    return cache;
   }
 
   private async requestJson<T>(
@@ -975,6 +987,15 @@ export default class FlowTimePlugin extends Plugin {
       }
     }
   }
+
+  private setCalendarViewsSyncing(syncing: boolean): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_FLOWTIME_CALENDAR)) {
+      const view = leaf.view;
+      if (view instanceof FlowTimeCalendarView) {
+        view.setIsSyncing(syncing);
+      }
+    }
+  }
 }
 
 class FlowTimeCalendarView extends ItemView {
@@ -982,10 +1003,16 @@ class FlowTimeCalendarView extends ItemView {
   private selectedDate = getLocalToday();
   private selectedWeek: { year: number; week: number; mondayDate: string } | null = null;
   private visibleMonth = startOfLocalMonth(new Date());
+  private isSyncing = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: FlowTimePlugin) {
     super(leaf);
     this.plugin = plugin;
+  }
+
+  setIsSyncing(val: boolean): void {
+    this.isSyncing = val;
+    this.render();
   }
 
   getViewType(): string {
@@ -1017,9 +1044,12 @@ class FlowTimeCalendarView extends ItemView {
     const header = container.createDiv({ cls: "flowtime-calendar-head" });
     header.createDiv({ text: "FlowTime 日历", cls: "flowtime-calendar-title" });
     const syncMonthButton = header.createEl("button", {
-      text: "同步本月",
+      text: this.isSyncing ? "同步中..." : "同步本月",
       cls: "flowtime-small-button",
     });
+    if (this.isSyncing) {
+      syncMonthButton.disabled = true;
+    }
     syncMonthButton.addEventListener("click", () => {
       void this.plugin.syncMonth(this.visibleMonth.getFullYear(), this.visibleMonth.getMonth());
     });
@@ -1157,11 +1187,13 @@ class FlowTimeCalendarView extends ItemView {
     const actions = panel.createDiv({ cls: "flowtime-day-actions" });
     
     const syncBtn = actions.createEl("button", { text: "同步此周数据", cls: "flowtime-small-button" });
+    if (this.isSyncing) syncBtn.disabled = true;
     syncBtn.addEventListener("click", async () => {
       await this.plugin.syncWeeklyNote(year, week, mondayDate);
     });
 
     const openBtn = actions.createEl("button", { text: "打开周总结文件", cls: "flowtime-small-button" });
+    if (this.isSyncing) openBtn.disabled = true;
     openBtn.addEventListener("click", async () => {
       await this.plugin.openWeeklyNote(year, week);
     });
@@ -1220,6 +1252,9 @@ class FlowTimeCalendarView extends ItemView {
 
   private createAction(parent: HTMLElement, label: string, action: () => Promise<void>): void {
     const button = parent.createEl("button", { text: label, cls: "flowtime-small-button" });
+    if (this.isSyncing) {
+      button.disabled = true;
+    }
     button.addEventListener("click", () => {
       void action();
     });
@@ -1802,7 +1837,18 @@ function timeRangeLabel(entry: FlowTimeEntry): string {
 
 function durationMinutes(entry: FlowTimeEntry): number {
   const start = new Date(entry.start_time);
-  const end = entry.end_time ? new Date(entry.end_time) : new Date();
+  let end: Date;
+  if (entry.end_time) {
+    end = new Date(entry.end_time);
+  } else {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (start < startOfToday) {
+      end = start;
+    } else {
+      end = now;
+    }
+  }
   return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
 }
 
@@ -1981,29 +2027,27 @@ async function ensureFolder(app: App, folderPath: string): Promise<void> {
 }
 
 function getYearAndWeek(dateStr: string): { year: number; week: number } {
-  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) {
-    throw new Error(`Invalid local date: ${dateStr}`);
-  }
-  const yearNum = Number(match[1]);
-  const monthNum = Number(match[2]);
-  const dayNumVal = Number(match[3]);
-
-  const date = new Date(yearNum, monthNum - 1, dayNumVal);
-  const d = new Date(date.getTime());
-  const day = (d.getDay() + 6) % 7 + 1;
-  d.setDate(d.getDate() + 4 - day);
-  const year = d.getFullYear();
-  const firstThursday = new Date(year, 0, 4);
-  const firstThursdayDay = (firstThursday.getDay() + 6) % 7 + 1;
-  firstThursday.setDate(firstThursday.getDate() + 4 - firstThursdayDay);
-  const weekNum = Math.round(((d.getTime() - firstThursday.getTime()) / 86400000) / 7) + 1;
-  return { year, week: weekNum };
+  const m = moment(dateStr, "YYYY-MM-DD");
+  return {
+    year: m.isoWeekYear(),
+    week: m.isoWeek(),
+  };
 }
 
 function entryDurationInDay(entry: FlowTimeEntry, dayStart: Date, dayEnd: Date): number {
   const entryStart = new Date(entry.start_time);
-  const entryEnd = entry.end_time ? new Date(entry.end_time) : new Date();
+  let entryEnd: Date;
+  if (entry.end_time) {
+    entryEnd = new Date(entry.end_time);
+  } else {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (entryStart < startOfToday) {
+      entryEnd = entryStart;
+    } else {
+      entryEnd = now;
+    }
+  }
 
   const start = entryStart > dayStart ? entryStart : dayStart;
   const end = entryEnd < dayEnd ? entryEnd : dayEnd;
