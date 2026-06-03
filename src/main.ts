@@ -460,10 +460,25 @@ export default class FlowTimePlugin extends Plugin {
     }
 
     const configuredPath = this.dailyNotePath(date) ?? `${date}.md`;
+    const shouldCreate = await this.confirmCreateDailyNote(date, configuredPath);
+    if (!shouldCreate) {
+      return;
+    }
 
-    await ensureFolder(this.app, parentFolder(configuredPath));
+    const existingFile = this.findDailyNoteFile(date);
+    if (existingFile) {
+      await this.app.workspace.getLeaf(false).openFile(existingFile);
+      return;
+    }
+
     const created = await this.createDailyNoteFromTemplate(date, configuredPath);
     await this.app.workspace.getLeaf(false).openFile(created);
+  }
+
+  private confirmCreateDailyNote(date: string, path: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      new CreateDailyNoteConfirmModal(this.app, date, path, resolve).open();
+    });
   }
 
   weeklyNotePath(year: number, week: number): string | null {
@@ -1394,6 +1409,62 @@ class DateInputModal extends Modal {
       this.close();
       this.onSubmit(date);
     });
+  }
+}
+
+class CreateDailyNoteConfirmModal extends Modal {
+  private settled = false;
+
+  constructor(
+    app: App,
+    private date: string,
+    private path: string,
+    private onResult: (confirmed: boolean) => void,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "创建日记文件？" });
+    contentEl.createEl("p", {
+      text: `没有找到 ${this.date} 的日记文件。是否现在创建？`,
+    });
+    contentEl.createEl("p", {
+      text: `将创建：${this.path}`,
+      cls: "setting-item-description",
+    });
+
+    const actions = contentEl.createDiv({ cls: "modal-button-container" });
+    const cancelButton = actions.createEl("button", { text: "取消" });
+    cancelButton.addEventListener("click", () => {
+      this.finish(false);
+    });
+
+    const createButton = actions.createEl("button", {
+      text: "创建",
+      cls: "mod-cta",
+    });
+    createButton.addEventListener("click", () => {
+      this.finish(true);
+    });
+    createButton.focus();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    if (!this.settled) {
+      this.settled = true;
+      this.onResult(false);
+    }
+  }
+
+  private finish(confirmed: boolean): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.onResult(confirmed);
+    this.close();
   }
 }
 
