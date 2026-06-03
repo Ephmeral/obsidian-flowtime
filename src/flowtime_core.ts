@@ -47,6 +47,11 @@ export interface ManagedBlockResult {
 
 const MANAGED_BLOCK_PATTERN =
   /<!--\s*flowtime:managed-start\b[^>]*-->\r?\n?[\s\S]*?\r?\n?<!--\s*flowtime:managed-end\s*-->/i;
+const MANAGED_BLOCK_START_PATTERN =
+  /^<!--\s*flowtime:managed-start\b[^>]*\bhash=(h[0-9a-f]+)[^>]*-->\r?\n?/i;
+const MANAGED_BLOCK_END_PATTERN = /\r?\n?<!--\s*flowtime:managed-end\s*-->\s*$/i;
+const DAILY_GENERATED_MARKER_PATTERN =
+  /^<!--\s*flowtime:daily-generated\s+hash=(h[0-9a-f]+)\s*-->\r?\n/i;
 
 export function flowTimeDailyPath(targetFolder: string, date: string): string {
   const normalizedFolder = normalizePath(targetFolder || "FlowTime/Daily");
@@ -57,6 +62,10 @@ export function flowTimeDailyPath(targetFolder: string, date: string): string {
 export function buildManagedBlock(date: string, flowtimeDailyPathValue: string): string {
   const embedPath = stripMarkdownExtension(normalizePath(flowtimeDailyPathValue));
   const body = [`## 时间日志总结`, "", `![[${embedPath}]]`].join("\n");
+  return buildManagedBlockFromBody(date, body);
+}
+
+export function buildManagedBlockFromBody(date: string, body: string): string {
   return [
     `<!-- flowtime:managed-start date=${date} hash=${hashText(body)} -->`,
     body,
@@ -89,6 +98,56 @@ export function hasManagedBlock(content: string): boolean {
 
 export function extractManagedBlock(content: string): string | null {
   return content.match(MANAGED_BLOCK_PATTERN)?.[0] ?? null;
+}
+
+export function isManagedBlockPristine(block: string): boolean {
+  const start = block.match(MANAGED_BLOCK_START_PATTERN);
+  if (!start?.[1]) return false;
+
+  const bodyAndEnd = block.slice(start[0].length);
+  const end = bodyAndEnd.match(MANAGED_BLOCK_END_PATTERN);
+  if (!end || end.index === undefined) return false;
+
+  const body = bodyAndEnd.slice(0, end.index);
+  return hashText(body) === start[1];
+}
+
+export function removeManagedBlock(content: string): string {
+  return content
+    .replace(MANAGED_BLOCK_PATTERN, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd();
+}
+
+export function buildDailyGeneratedContent(markdown: string): { content: string; renderedHash: string } {
+  const bodyHash = hashText(markdown);
+  const content = [`<!-- flowtime:daily-generated hash=${bodyHash} -->`, markdown].join("\n");
+  return {
+    content,
+    renderedHash: hashText(content),
+  };
+}
+
+export function isOwnedDailyGeneratedContent(content: string): boolean {
+  const match = content.match(DAILY_GENERATED_MARKER_PATTERN);
+  if (!match?.[1]) return false;
+  const body = content.slice(match[0].length);
+  return hashText(body) === match[1];
+}
+
+export function isSecureAuthUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+
+  if (url.protocol === "https:") return true;
+  if (url.protocol !== "http:") return false;
+
+  const host = url.hostname.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
 }
 
 export function classifyDayStatus(input: DayStatusInput): DaySyncStatus {

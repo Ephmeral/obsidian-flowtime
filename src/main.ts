@@ -19,12 +19,15 @@ import {
   DaySyncState,
   DaySyncStatus,
   ManagedBlockInsertLocation,
-  buildManagedBlock,
+  buildManagedBlockFromBody,
   buildMonthStats,
   extractManagedBlock,
   flowTimeDailyPath,
   hashText,
-  hasManagedBlock,
+  isManagedBlockPristine,
+  isOwnedDailyGeneratedContent,
+  isSecureAuthUrl,
+  removeManagedBlock,
   replaceOrInsertManagedBlock,
 } from "./flowtime_core";
 
@@ -41,6 +44,7 @@ interface FlowTimePluginSettings {
   dailyNoteBridgeEnabled: boolean;
   dailyNoteInsertLocation: ManagedBlockInsertLocation;
   dailyNoteInsertHeading: string;
+  dailyNoteTemplatePath: string;
   dayStates: Record<string, DaySyncState>;
   lastSyncAt: string;
   lastSyncedDailyPath: string;
@@ -61,6 +65,7 @@ const DEFAULT_SETTINGS: FlowTimePluginSettings = {
   dailyNoteBridgeEnabled: false,
   dailyNoteInsertLocation: "bottom",
   dailyNoteInsertHeading: "",
+  dailyNoteTemplatePath: "",
   dayStates: {},
   lastSyncAt: "",
   lastSyncedDailyPath: "",
@@ -143,17 +148,15 @@ interface DayEntries {
   maxServerVersion: number;
 }
 
-interface WriteDailyResult {
-  status: "written" | "conflict";
-  path: string;
-  renderedHash?: string;
-  errorMessage?: string;
-}
-
 interface BridgeWriteResult {
   path?: string;
   managedBlockHash?: string;
   conflict?: boolean;
+  errorMessage?: string;
+}
+
+interface EmptyCleanupResult {
+  conflict: boolean;
   errorMessage?: string;
 }
 
@@ -198,6 +201,16 @@ export default class FlowTimePlugin extends Plugin {
       callback: () => {
         new DateInputModal(this.app, "同步 FlowTime 日期", getLocalToday(), (date) => {
           void this.syncDay(date);
+        }).open();
+      },
+    });
+
+    this.addCommand({
+      id: "force-refresh-flowtime-date",
+      name: "Force refresh FlowTime data for date...",
+      callback: () => {
+        new DateInputModal(this.app, "强制刷新 FlowTime 日期", getLocalToday(), (date) => {
+          void this.forceRefreshDay(date);
         }).open();
       },
     });
@@ -272,6 +285,11 @@ export default class FlowTimePlugin extends Plugin {
 
   async syncToday(): Promise<void> {
     await this.syncDay(getLocalToday());
+  }
+
+  async forceRefreshDay(date: string): Promise<void> {
+    this.resetFlowTimeDataCache();
+    await this.syncDay(date);
   }
 
   async syncDay(date: string, options: { quiet?: boolean; force?: boolean } = {}): Promise<void> {
@@ -398,7 +416,7 @@ export default class FlowTimePlugin extends Plugin {
         const status: DaySyncStatus =
           previous.status === "conflict"
             ? "conflict"
-            : previous.serverCursor === serverCursor && previous.renderedHash
+            : previous.serverCursor === serverCursor && previous.managedBlockHash
               ? "synced"
               : "stale";
 
@@ -424,13 +442,14 @@ export default class FlowTimePlugin extends Plugin {
 
   async openFlowTimeDaily(date: string): Promise<void> {
     const state = this.getDayState(date);
-    const path = state.flowtimeDailyPath || flowTimeDailyPath(this.settings.targetFolder, date);
-    const file = this.app.vault.getAbstractFileByPath(path);
+    const file = state.obsidianDailyPath
+      ? this.app.vault.getAbstractFileByPath(state.obsidianDailyPath)
+      : this.findDailyNoteFile(date);
     if (file instanceof TFile) {
       await this.app.workspace.getLeaf(false).openFile(file);
       return;
     }
-    new Notice(`未找到 FlowTime 日志：${path}`);
+    await this.openObsidianDaily(date);
   }
 
   async openObsidianDaily(date: string): Promise<void> {
@@ -440,14 +459,10 @@ export default class FlowTimePlugin extends Plugin {
       return;
     }
 
-    const configuredPath = this.dailyNotePath(date);
-    if (!configuredPath) {
-      new Notice(`未找到 ${date} 的 Daily Note。可在设置中配置 Daily Note folder。`);
-      return;
-    }
+    const configuredPath = this.dailyNotePath(date) ?? `${date}.md`;
 
     await ensureFolder(this.app, parentFolder(configuredPath));
-    const created = await this.app.vault.create(configuredPath, `# ${date}\n`);
+    const created = await this.createDailyNoteFromTemplate(date, configuredPath);
     await this.app.workspace.getLeaf(false).openFile(created);
   }
 
@@ -539,6 +554,12 @@ export default class FlowTimePlugin extends Plugin {
       const existingFile = this.app.vault.getAbstractFileByPath(path);
       if (existingFile instanceof TFile) {
         const content = await this.app.vault.read(existingFile);
+        const existingBlock = extractManagedBlock(content);
+        if (existingBlock && !isManagedBlockPristine(existingBlock)) {
+          new Notice("周总结托管区存在本地修改，已跳过同步。");
+          return;
+        }
+
         const block = buildWeeklyManagedBlock(year, week, markdown);
         const next = replaceOrInsertManagedBlock(
           content,
@@ -615,9 +636,30 @@ export default class FlowTimePlugin extends Plugin {
     const metrics = buildDayMetrics(date, dayEntries.entries, data.categories);
 
     if (dayEntries.entries.length === 0) {
+      const cleanup = await this.clearSyncedDayContent(date, previous, options.force);
+      if (cleanup.conflict) {
+        const state = this.updateDayState(date, {
+          ...previous,
+          status: "conflict",
+          serverCursor: String(dayEntries.maxServerVersion),
+          totalMinutes: 0,
+          entryCount: 0,
+          topCategory: "",
+          errorMessage: cleanup.errorMessage,
+        });
+        await this.saveSettings();
+        if (!options.quiet) {
+          new Notice(`${date} 的旧 FlowTime 内容存在本地修改，已标记冲突。`);
+        }
+        return state;
+      }
+
       const state = this.updateDayState(date, {
         ...previous,
         status: "empty",
+        flowtimeDailyPath: undefined,
+        renderedHash: undefined,
+        managedBlockHash: undefined,
         serverCursor: String(dayEntries.maxServerVersion),
         totalMinutes: 0,
         entryCount: 0,
@@ -631,21 +673,21 @@ export default class FlowTimePlugin extends Plugin {
       return state;
     }
 
-    const markdown = renderDailyLog({
+    const managedBody = renderDailyManagedBlockBody({
       date,
       generatedAt: new Date(),
       entries: dayEntries.entries,
       categories: data.categories,
       tags: data.tags,
     });
-    const filePath = flowTimeDailyPath(this.settings.targetFolder, date);
-    const writeResult = await this.writeFlowTimeDailyFile(date, filePath, markdown, previous, options.force);
+    const writeResult = await this.writeDailyNoteManagedBlock(date, managedBody, previous, options.force);
 
-    if (writeResult.status === "conflict") {
+    if (writeResult?.conflict) {
       const state = this.updateDayState(date, {
         ...previous,
         status: "conflict",
-        flowtimeDailyPath: writeResult.path,
+        flowtimeDailyPath: undefined,
+        obsidianDailyPath: writeResult.path ?? previous.obsidianDailyPath,
         serverCursor: String(dayEntries.maxServerVersion),
         totalMinutes: metrics.totalMinutes,
         entryCount: dayEntries.entries.length,
@@ -654,44 +696,20 @@ export default class FlowTimePlugin extends Plugin {
       });
       await this.saveSettings();
       if (!options.quiet) {
-        new Notice(`${date} 的 FlowTime 日志存在本地修改，已标记冲突。`);
+        new Notice(`${date} 的 Daily Note FlowTime 托管区存在本地修改，已标记冲突。`);
       }
       return state;
-    }
-
-    let bridgeResult: BridgeWriteResult | null = null;
-    if (this.settings.dailyNoteBridgeEnabled) {
-      bridgeResult = await this.writeDailyNoteBridge(date, writeResult.path, previous, options.force);
-      if (bridgeResult?.conflict) {
-        const state = this.updateDayState(date, {
-          ...previous,
-          status: "conflict",
-          flowtimeDailyPath: writeResult.path,
-          obsidianDailyPath: bridgeResult.path ?? previous.obsidianDailyPath,
-          serverCursor: String(dayEntries.maxServerVersion),
-          renderedHash: writeResult.renderedHash,
-          totalMinutes: metrics.totalMinutes,
-          entryCount: dayEntries.entries.length,
-          topCategory: metrics.topCategory,
-          errorMessage: bridgeResult.errorMessage,
-        });
-        await this.saveSettings();
-        if (!options.quiet) {
-          new Notice(`${date} 的 Daily Note 管理区存在本地修改，已标记冲突。`);
-        }
-        return state;
-      }
     }
 
     const state = this.updateDayState(date, {
       ...previous,
       status: "synced",
       locked: false,
-      flowtimeDailyPath: writeResult.path,
-      obsidianDailyPath: bridgeResult?.path ?? previous.obsidianDailyPath,
+      flowtimeDailyPath: undefined,
+      obsidianDailyPath: writeResult?.path ?? previous.obsidianDailyPath,
       serverCursor: String(dayEntries.maxServerVersion),
-      renderedHash: writeResult.renderedHash,
-      managedBlockHash: bridgeResult?.managedBlockHash ?? previous.managedBlockHash,
+      renderedHash: undefined,
+      managedBlockHash: writeResult?.managedBlockHash ?? previous.managedBlockHash,
       totalMinutes: metrics.totalMinutes,
       entryCount: dayEntries.entries.length,
       topCategory: metrics.topCategory,
@@ -700,111 +718,68 @@ export default class FlowTimePlugin extends Plugin {
     });
 
     this.settings.lastSyncAt = state.lastSyncedAt ?? "";
-    this.settings.lastSyncedDailyPath = writeResult.path;
+    this.settings.lastSyncedDailyPath = state.obsidianDailyPath ?? "";
     await this.saveSettings();
 
     if (!options.quiet) {
-      new Notice(`FlowTime 日志已写入：${writeResult.path}`);
+      new Notice(`FlowTime 日志已写入日记：${state.obsidianDailyPath ?? date}`);
     }
     return state;
   }
 
-  private async writeFlowTimeDailyFile(
+  private async writeDailyNoteManagedBlock(
     date: string,
-    filePath: string,
-    markdown: string,
+    managedBody: string,
     previous: DaySyncState,
     force = false,
-  ): Promise<WriteDailyResult> {
-    await ensureFolder(this.app, parentFolder(filePath));
-
-    const renderedHash = hashText(markdown);
-    const existing = this.app.vault.getAbstractFileByPath(filePath);
-    if (existing instanceof TFile) {
-      const current = await this.app.vault.read(existing);
-      const currentHash = hashText(current);
-      const knownGeneratedContent =
-        previous.renderedHash === currentHash || looksLikeFlowTimeDailyFile(current);
-
-      if (!force && previous.renderedHash && previous.renderedHash !== currentHash) {
-        return {
-          status: "conflict",
-          path: filePath,
-          errorMessage: "FlowTime generated file was modified locally.",
-        };
-      }
-
-      if (!force && !previous.renderedHash && !knownGeneratedContent) {
-        return {
-          status: "conflict",
-          path: filePath,
-          errorMessage: "Existing file does not look like a FlowTime daily log.",
-        };
-      }
-
-      await this.app.vault.modify(existing, markdown);
-      return {
-        status: "written",
-        path: filePath,
-        renderedHash,
-      };
-    }
-
-    if (existing === null) {
-      await this.app.vault.create(filePath, markdown);
-      return {
-        status: "written",
-        path: filePath,
-        renderedHash,
-      };
-    }
-
-    throw new Error(`${filePath} 已存在但不是 Markdown 文件。`);
-  }
-
-  private async writeDailyNoteBridge(
-    date: string,
-    flowtimeDailyPathValue: string,
-    previous: DaySyncState,
-    force = false,
-  ): Promise<BridgeWriteResult | null> {
+  ): Promise<BridgeWriteResult> {
     const targetPath = this.dailyNotePath(date);
     const existingFile = this.findDailyNoteFile(date);
 
-    if (!existingFile && !targetPath) {
-      return null;
+    if (!targetPath) {
+      const candidates = this.findDailyNoteCandidates(date);
+      if (candidates.length > 1) {
+        return {
+          conflict: true,
+          errorMessage: "Multiple daily notes match this date; configure Daily Note folder before sync.",
+        };
+      }
     }
 
-    const file =
-      existingFile ??
-      (await this.createDailyNoteWithManagedPlaceholder(date, targetPath ?? `${date}.md`));
+    const { file, created } = existingFile
+      ? { file: existingFile, created: false }
+      : {
+          file: await this.createDailyNoteFromTemplate(date, targetPath ?? `${date}.md`),
+          created: true,
+        };
     const content = await this.app.vault.read(file);
     const existingBlock = extractManagedBlock(content);
 
-    if (existingBlock && previous.managedBlockHash && hashText(existingBlock) !== previous.managedBlockHash && !force) {
-      this.updateDayState(date, {
-        ...previous,
-        status: "conflict",
-        errorMessage: "Daily Note managed block was modified locally.",
-      });
-      return {
-        path: file.path,
-        conflict: true,
-        errorMessage: "Daily Note managed block was modified locally.",
-      };
+    if (existingBlock && !force && !created) {
+      const expectedBlockUnchanged = previous.managedBlockHash
+        ? hashText(existingBlock) === previous.managedBlockHash
+        : isManagedBlockPristine(existingBlock);
+      if (!expectedBlockUnchanged) {
+        this.updateDayState(date, {
+          ...previous,
+          status: "conflict",
+          errorMessage: "Daily Note managed block was modified locally.",
+        });
+        return {
+          path: file.path,
+          conflict: true,
+          errorMessage: "Daily Note managed block was modified locally.",
+        };
+      }
     }
 
-    const block = buildManagedBlock(date, flowtimeDailyPathValue);
+    const block = buildManagedBlockFromBody(date, managedBody);
     const next = replaceOrInsertManagedBlock(
       content,
       block,
       this.settings.dailyNoteInsertLocation,
       this.settings.dailyNoteInsertHeading,
     );
-
-    if (next.action === "inserted" && hasManagedBlock(content)) {
-      return null;
-    }
 
     await this.app.vault.modify(file, next.content);
     return {
@@ -813,11 +788,67 @@ export default class FlowTimePlugin extends Plugin {
     };
   }
 
-  private async createDailyNoteWithManagedPlaceholder(date: string, path: string): Promise<TFile> {
+  private async clearSyncedDayContent(
+    date: string,
+    previous: DaySyncState,
+    force = false,
+  ): Promise<EmptyCleanupResult> {
+    const flowtimePath = previous.flowtimeDailyPath || flowTimeDailyPath(this.settings.targetFolder, date);
+    const generatedFile = this.app.vault.getAbstractFileByPath(flowtimePath);
+    if (generatedFile instanceof TFile) {
+      const current = await this.app.vault.read(generatedFile);
+      const safeToDelete =
+        force ||
+        (previous.renderedHash ? hashText(current) === previous.renderedHash : isOwnedDailyGeneratedContent(current));
+
+      if (!safeToDelete) {
+        return {
+          conflict: true,
+          errorMessage: "FlowTime generated file was modified locally.",
+        };
+      }
+
+      await this.app.vault.delete(generatedFile);
+    }
+
+    const bridgeFile = previous.obsidianDailyPath
+      ? this.app.vault.getAbstractFileByPath(previous.obsidianDailyPath)
+      : this.findDailyNoteFile(date);
+    if (bridgeFile instanceof TFile) {
+      const content = await this.app.vault.read(bridgeFile);
+      const existingBlock = extractManagedBlock(content);
+      if (existingBlock) {
+        const safeToRemove =
+          force ||
+          (previous.managedBlockHash
+            ? hashText(existingBlock) === previous.managedBlockHash
+            : isManagedBlockPristine(existingBlock));
+
+        if (!safeToRemove) {
+          return {
+            conflict: true,
+            errorMessage: "Daily Note managed block was modified locally.",
+          };
+        }
+
+        await this.app.vault.modify(bridgeFile, removeManagedBlock(content));
+      }
+    }
+
+    return { conflict: false };
+  }
+
+  private async createDailyNoteFromTemplate(date: string, path: string): Promise<TFile> {
     await ensureFolder(this.app, parentFolder(path));
-    const block = buildManagedBlock(date, flowTimeDailyPath(this.settings.targetFolder, date));
-    const content = [`# ${date}`, "", block, ""].join("\n");
-    return this.app.vault.create(path, content);
+    const templatePath = this.settings.dailyNoteTemplatePath.trim();
+    if (templatePath) {
+      const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+      if (templateFile instanceof TFile) {
+        return this.app.vault.create(path, await this.app.vault.read(templateFile));
+      }
+      new Notice(`未找到配置的每日模板文件：${templatePath}`);
+    }
+    return this.app.vault.create(path, `# ${date}\n`);
   }
 
   private findDailyNoteFile(date: string): TFile | null {
@@ -827,12 +858,15 @@ export default class FlowTimePlugin extends Plugin {
       if (file instanceof TFile) return file;
     }
 
+    const candidates = this.findDailyNoteCandidates(date);
+    return candidates.length === 1 ? candidates[0] ?? null : null;
+  }
+
+  private findDailyNoteCandidates(date: string): TFile[] {
     const flowtimePath = flowTimeDailyPath(this.settings.targetFolder, date);
-    return (
-      this.app.vault
-        .getMarkdownFiles()
-        .find((file) => file.basename === date && file.path !== flowtimePath) ?? null
-    );
+    return this.app.vault
+      .getMarkdownFiles()
+      .filter((file) => file.basename === date && file.path !== flowtimePath);
   }
 
   private dailyNotePath(date: string): string | null {
@@ -851,6 +885,13 @@ export default class FlowTimePlugin extends Plugin {
       [date]: stored,
     };
     return stored;
+  }
+
+  private resetFlowTimeDataCache(): void {
+    this.cachedCategoryRecords = [];
+    this.cachedTagRecords = [];
+    this.cachedEntryRecords = [];
+    this.collectionCursors = {};
   }
 
   private async loadFlowTimeData(): Promise<FlowTimeDataSet> {
@@ -939,8 +980,13 @@ export default class FlowTimePlugin extends Plugin {
       headers.Authorization = `${this.settings.tokenType || "Bearer"} ${this.settings.accessToken}`;
     }
 
+    const url = this.apiUrl(path);
+    if ((options.authenticated || path === "/auth/login") && !isSecureAuthUrl(url)) {
+      throw new Error("FlowTime 登录和同步需要 HTTPS；本机 localhost/127.0.0.1/::1 调试地址除外。");
+    }
+
     const response = await requestUrl({
-      url: this.apiUrl(path),
+      url,
       method: options.method,
       headers,
       body: options.body,
@@ -1246,7 +1292,11 @@ class FlowTimeCalendarView extends ItemView {
 
     const actions = panel.createDiv({ cls: "flowtime-day-actions" });
     this.createAction(actions, "同步此日数据", () => this.plugin.syncDay(this.selectedDate));
-    this.createAction(actions, "预览时间记录", () => this.plugin.openFlowTimeDaily(this.selectedDate));
+    this.createAction(actions, "强制刷新数据", () => this.plugin.forceRefreshDay(this.selectedDate));
+    if (state.status === "conflict") {
+      this.createAction(actions, "覆盖托管区并同步", () => this.plugin.syncDay(this.selectedDate, { force: true }));
+    }
+    this.createAction(actions, "打开时间日志", () => this.plugin.openFlowTimeDaily(this.selectedDate));
     this.createAction(actions, "打开日记文件", () => this.plugin.openObsidianDaily(this.selectedDate));
   }
 
@@ -1271,7 +1321,19 @@ class FlowTimeCalendarView extends ItemView {
       }),
     );
     menu.addItem((item) =>
-      item.setTitle("预览时间记录").setIcon("file-text").onClick(() => {
+      item.setTitle("强制刷新数据").setIcon("refresh-cw").onClick(() => {
+        void this.plugin.forceRefreshDay(date);
+      }),
+    );
+    if (state.status === "conflict") {
+      menu.addItem((item) =>
+        item.setTitle("覆盖托管区并同步").setIcon("replace").onClick(() => {
+          void this.plugin.syncDay(date, { force: true });
+        }),
+      );
+    }
+    menu.addItem((item) =>
+      item.setTitle("打开时间日志").setIcon("file-text").onClick(() => {
         void this.plugin.openFlowTimeDaily(date);
       }),
     );
@@ -1412,8 +1474,8 @@ class FlowTimeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Daily log folder")
-      .setDesc("FlowTime 生成的时间日志会写入该目录下的年份子目录。")
+      .setName("旧版独立日志文件夹")
+      .setDesc("仅用于兼容旧版 FlowTime/Daily 独立日志文件；新的每日同步会直接写入 Daily Note 托管区。")
       .addText((text) =>
         text
           .setPlaceholder("FlowTime/Daily")
@@ -1426,7 +1488,7 @@ class FlowTimeSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Daily Note folder")
-      .setDesc("可选。用于打开或创建 Obsidian Daily Note，例如 Journals。留空时只查找同名日期笔记。")
+      .setDesc("用于打开或创建 Obsidian Daily Note，例如 Journals。留空时会查找同名日期笔记，找不到则在根目录创建。")
       .addText((text) =>
         text
           .setPlaceholder("Journals")
@@ -1438,13 +1500,16 @@ class FlowTimeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Daily Note bridge")
-      .setDesc("开启后，同步时会向 Daily Note 插入或更新 flowtime:managed 区块。默认关闭以保护已有内容。")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.dailyNoteBridgeEnabled).onChange(async (value) => {
-          this.plugin.settings.dailyNoteBridgeEnabled = value;
-          await this.plugin.saveSettings();
-        }),
+      .setName("每日模板文件路径")
+      .setDesc("可选。新建 Daily Note 时使用的模板文件，例如 Templates/Daily.md；FlowTime 托管区会插入在模板内容中。")
+      .addText((text) =>
+        text
+          .setPlaceholder("Templates/Daily.md")
+          .setValue(this.plugin.settings.dailyNoteTemplatePath)
+          .onChange(async (value) => {
+            this.plugin.settings.dailyNoteTemplatePath = normalizePath(value.trim());
+            await this.plugin.saveSettings();
+          }),
       );
 
     new Setting(containerEl)
@@ -1535,7 +1600,7 @@ class FlowTimeSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync today")
-      .setDesc("拉取服务端今日时间记录，并生成今天的 Markdown 日志。")
+      .setDesc("拉取服务端今日时间记录，并写入今天 Daily Note 的 FlowTime 托管区。")
       .addButton((button) =>
         button.setButtonText("Sync now").setCta().onClick(() => {
           void this.plugin.syncToday();
@@ -1738,6 +1803,70 @@ function renderDailyLog(input: {
   return lines.join("\n");
 }
 
+function renderDailyManagedBlockBody(input: {
+  date: string;
+  generatedAt: Date;
+  entries: FlowTimeEntry[];
+  categories: Map<string, FlowTimeCategory>;
+  tags: Map<string, FlowTimeTag>;
+}): string {
+  const range = localDateRange(input.date);
+  const totalMinutes = input.entries.reduce((sum, entry) => sum + entryDurationInDay(entry, range.start, range.end), 0);
+  const categoryTotals = buildCategoryTotals(input.entries, input.categories, range.start, range.end);
+  const topCategory = categoryTotals[0]?.name ?? "";
+  const avgHappiness = averageScore(input.entries, (entry) => entry.pleasure_score);
+  const avgMeaning = averageScore(input.entries, (entry) => entry.meaning_score);
+  const lines: string[] = [];
+
+  lines.push("## FlowTime 时间日志");
+  lines.push("");
+  lines.push(`- 同步时间：${input.generatedAt.toLocaleString()}`);
+  lines.push(`- 总时长：${formatDuration(totalMinutes)}`);
+  lines.push(`- 记录数：${input.entries.length}`);
+  lines.push(`- 最高分类：${topCategory || "无"}`);
+  lines.push(`- 快乐均分：${avgHappiness === null ? "无" : avgHappiness.toFixed(1)}`);
+  lines.push(`- 意义均分：${avgMeaning === null ? "无" : avgMeaning.toFixed(1)}`);
+  lines.push("");
+
+  lines.push("### 时间分配");
+  lines.push("");
+  if (categoryTotals.length === 0) {
+    lines.push("暂无时间分配。");
+  } else {
+    lines.push("| 分类 | 时长 | 占比 |");
+    lines.push("| --- | --- | --- |");
+    for (const item of categoryTotals) {
+      const percent = totalMinutes > 0 ? `${Math.round((item.minutes / totalMinutes) * 100)}%` : "0%";
+      lines.push(`| ${tableCell(item.name)} | ${formatCompactDuration(item.minutes)} | ${percent} |`);
+    }
+  }
+  lines.push("");
+
+  lines.push("### 时间条目");
+  lines.push("");
+  if (input.entries.length === 0) {
+    lines.push("今天暂无 FlowTime 时间记录。");
+  } else {
+    for (const entry of input.entries) {
+      appendTimelineEntry(lines, entry, input.categories, input.tags);
+    }
+  }
+  lines.push("");
+
+  lines.push("### 分类统计");
+  lines.push("");
+  if (categoryTotals.length === 0) {
+    lines.push("暂无分类统计。");
+  } else {
+    lines.push(`- 总时长：${formatDuration(totalMinutes)}`);
+    lines.push(`- 记录数：${input.entries.length}`);
+    lines.push(`- 最高分类：${topCategory || "无"}`);
+  }
+  lines.push("");
+
+  return lines.join("\n");
+}
+
 function buildDayMetrics(
   date: string,
   entries: FlowTimeEntry[],
@@ -1841,13 +1970,7 @@ function durationMinutes(entry: FlowTimeEntry): number {
   if (entry.end_time) {
     end = new Date(entry.end_time);
   } else {
-    const now = new Date();
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    if (start < startOfToday) {
-      end = start;
-    } else {
-      end = now;
-    }
+    end = new Date();
   }
   return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
 }
@@ -1981,14 +2104,6 @@ function statusLabel(status: DaySyncStatus): string {
   return labels[status];
 }
 
-function looksLikeFlowTimeDailyFile(content: string): boolean {
-  return (
-    content.includes("source: flowtime") ||
-    content.includes("tags: [flowtime, daily-log]") ||
-    content.includes("FlowTime 日志")
-  );
-}
-
 function parentFolder(path: string): string {
   const normalized = normalizePath(path);
   const index = normalized.lastIndexOf("/");
@@ -2040,13 +2155,7 @@ function entryDurationInDay(entry: FlowTimeEntry, dayStart: Date, dayEnd: Date):
   if (entry.end_time) {
     entryEnd = new Date(entry.end_time);
   } else {
-    const now = new Date();
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    if (entryStart < startOfToday) {
-      entryEnd = entryStart;
-    } else {
-      entryEnd = now;
-    }
+    entryEnd = new Date();
   }
 
   const start = entryStart > dayStart ? entryStart : dayStart;

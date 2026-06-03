@@ -2,11 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildDailyGeneratedContent,
   buildManagedBlock,
+  buildManagedBlockFromBody,
   buildMonthStats,
   classifyDayStatus,
   flowTimeDailyPath,
   hashText,
+  isManagedBlockPristine,
+  isOwnedDailyGeneratedContent,
+  isSecureAuthUrl,
+  removeManagedBlock,
   replaceOrInsertManagedBlock,
 } from "../build-test/flowtime_core.js";
 
@@ -80,4 +86,50 @@ test("builds month stats from day sync states", () => {
 test("hashes text deterministically", () => {
   assert.equal(hashText("same content"), hashText("same content"));
   assert.notEqual(hashText("same content"), hashText("different content"));
+});
+
+test("marks generated daily content with a verifiable ownership hash", () => {
+  const generated = buildDailyGeneratedContent("# 2026-05-28 FlowTime 日志\n");
+
+  assert.equal(isOwnedDailyGeneratedContent(generated.content), true);
+  assert.equal(hashText(generated.content), generated.renderedHash);
+  assert.equal(
+    isOwnedDailyGeneratedContent(`${generated.content}\n用户手动补充`),
+    false,
+  );
+});
+
+test("detects local edits inside managed blocks", () => {
+  const block = buildManagedBlock("2026-05-28", "FlowTime/Daily/2026/2026-05-28.md");
+  const edited = block.replace("## 时间日志总结", "## 手动改过的时间日志总结");
+
+  assert.equal(isManagedBlockPristine(block), true);
+  assert.equal(isManagedBlockPristine(edited), false);
+});
+
+test("builds managed blocks from inline Daily Note content", () => {
+  const body = ["## FlowTime 时间日志", "", "### 时间条目", "- 09:00 **工作**"].join("\n");
+  const block = buildManagedBlockFromBody("2026-05-28", body);
+
+  assert.equal(isManagedBlockPristine(block), true);
+  assert.match(block, /## FlowTime 时间日志/);
+  assert.doesNotMatch(block, /!\[\[/);
+});
+
+test("removes only the managed block when clearing empty synced days", () => {
+  const block = buildManagedBlock("2026-05-28", "FlowTime/Daily/2026/2026-05-28.md");
+  const before = ["# 2026-05-28", "", "用户内容", "", block, "", "## 复盘"].join("\n");
+  const after = removeManagedBlock(before);
+
+  assert.match(after, /用户内容/);
+  assert.match(after, /## 复盘/);
+  assert.doesNotMatch(after, /flowtime:managed-start/);
+});
+
+test("allows auth over HTTPS or loopback HTTP only", () => {
+  assert.equal(isSecureAuthUrl("https://flowtime.example.com/api/v1"), true);
+  assert.equal(isSecureAuthUrl("http://localhost:8080/api/v1"), true);
+  assert.equal(isSecureAuthUrl("http://127.0.0.1:8080/api/v1"), true);
+  assert.equal(isSecureAuthUrl("http://[::1]:8080/api/v1"), true);
+  assert.equal(isSecureAuthUrl("http://192.168.1.10:8080/api/v1"), false);
 });
